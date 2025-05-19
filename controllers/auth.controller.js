@@ -1,7 +1,22 @@
+// controllers/auth.controller.js
 import { adminAuth, adminDb } from "../config/firebase.js";
 import AppError from "../utils/AppError.js";
 
-const SESSION_DURATION = 5 * 60 * 1000; // 5 minutes
+// const SESSION_DURATION = 5 * 1000 * 60; // 5 minutes in milliseconds
+// const COOKIE_MAX_AGE = SESSION_DURATION * 1000; // 5 minutes in milliseconds
+
+const SESSION_DURATION = 2 * 24 * 60 * 60 * 1000; // 2 days in milliseconds (172800000 ms)
+const COOKIE_MAX_AGE = SESSION_DURATION; // Same value for cookie maxAge
+
+// Keep all other code the same except these constants
+
+const formatUserResponse = (userData) => ({
+  uid: userData.uid,
+  name: userData.name,
+  email: userData.email,
+  expiresAt: userData.expiresAt,
+  ...userData,
+});
 
 // User registration
 export const signUp = async (req, res, next) => {
@@ -12,6 +27,7 @@ export const signUp = async (req, res, next) => {
       throw new AppError(400, "All fields are required");
     }
 
+    // Check existing user
     try {
       await adminAuth.getUserByEmail(email);
       throw new AppError(400, "User already exists with this email");
@@ -19,20 +35,15 @@ export const signUp = async (req, res, next) => {
       if (error.code !== "auth/user-not-found") throw error;
     }
 
+    // Create Firebase Auth user
     const userRecord = await adminAuth.createUser({
       email,
       password,
       displayName: name,
     });
 
+    // Create Firestore user document
     const userRef = adminDb.collection("users").doc(userRecord.uid);
-    const userDoc = await userRef.get();
-
-    if (userDoc.exists) {
-      await adminAuth.deleteUser(userRecord.uid);
-      throw new AppError(400, "User already exists in system");
-    }
-
     await userRef.set({
       name,
       email,
@@ -41,10 +52,11 @@ export const signUp = async (req, res, next) => {
 
     res.status(201).json({
       success: true,
-      data: {
+      data: formatUserResponse({
         uid: userRecord.uid,
-        email: userRecord.email,
-      },
+        name,
+        email,
+      }),
     });
   } catch (error) {
     next(error);
@@ -56,42 +68,40 @@ export const logIn = async (req, res, next) => {
   try {
     const { idToken } = req.body;
 
-    // Validate input
     if (!idToken) {
       throw new AppError(400, "ID token is required");
     }
 
+    // Create session cookie
     const sessionCookie = await adminAuth.createSessionCookie(idToken, {
       expiresIn: SESSION_DURATION,
     });
 
+    // Verify and get user data
     const decodedToken = await adminAuth.verifySessionCookie(sessionCookie);
-    const expiresAt = new Date(decodedToken.exp * 1000);
-
-    // console.log("decodedToken:", decodedToken);
-
     const userRecord = await adminAuth.getUser(decodedToken.uid);
 
-    // console.log("userRecord:", userRecord);
-
+    // Set cookie
     res.cookie("session", sessionCookie, {
-      maxAge: SESSION_DURATION,
+      maxAge: COOKIE_MAX_AGE,
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      // sameSite: "strict",
+      sameSite: "lax",
       path: "/",
     });
 
     res.status(200).json({
       success: true,
-      data: {
+      data: formatUserResponse({
         uid: userRecord.uid,
         name: userRecord.displayName,
         email: userRecord.email,
-        expiresAt: expiresAt.toISOString(),
-      },
+        expiresAt: new Date(decodedToken.exp * 1000).toISOString(),
+      }),
     });
   } catch (error) {
+    console.log("error:", error);
     next(new AppError(401, "Invalid credentials"));
   }
 };
@@ -101,25 +111,28 @@ export const refreshSession = async (req, res, next) => {
   try {
     const { idToken } = req.body;
 
+    // Create new session cookie
     const sessionCookie = await adminAuth.createSessionCookie(idToken, {
       expiresIn: SESSION_DURATION,
     });
 
+    // Verify and get expiration
     const decodedToken = await adminAuth.verifySessionCookie(sessionCookie);
-    const expiresAt = new Date(decodedToken.exp * 1000);
 
+    // Set cookie
     res.cookie("session", sessionCookie, {
-      maxAge: SESSION_DURATION,
+      maxAge: COOKIE_MAX_AGE,
       httpOnly: true,
       secure: process.env.NODE_ENV === "production",
-      sameSite: "strict",
+      // sameSite: "strict",
+      sameSite: "lax",
       path: "/",
     });
 
     res.json({
       success: true,
       data: {
-        expiresAt: expiresAt.toISOString(),
+        expiresAt: new Date(decodedToken.exp * 1000).toISOString(),
       },
     });
   } catch (error) {
@@ -130,19 +143,9 @@ export const refreshSession = async (req, res, next) => {
 // Get current user
 export const getCurrentUser = async (req, res, next) => {
   try {
-    const { uid } = req.user;
-    const userDoc = await adminDb.collection("users").doc(uid).get();
-
-    if (!userDoc.exists) {
-      throw new AppError(404, "User not found");
-    }
-
     res.status(200).json({
       success: true,
-      data: {
-        uid: userDoc.id,
-        ...userDoc.data(),
-      },
+      data: formatUserResponse(req.user),
     });
   } catch (error) {
     next(error);
@@ -162,50 +165,4 @@ export const signOut = (req, res) => {
     success: true,
     message: "Logged out successfully",
   });
-};
-
-/* ------- */
-
-export const logInOld = async (req, res, next) => {
-  try {
-    const { idToken } = req.body;
-
-    // Validate input
-    if (!idToken) {
-      throw new AppError(400, "ID token is required");
-    }
-
-    // Verify Firebase ID token and create session cookie
-    const sessionCookie = await adminAuth.createSessionCookie(idToken, {
-      expiresIn: 60 * 60 * 24 * 7 * 1000, // 1 week
-    });
-
-    // Get user details from the ID token
-    const decodedToken = await adminAuth.verifySessionCookie(
-      sessionCookie,
-      true
-    );
-    const userRecord = await adminAuth.getUser(decodedToken.uid);
-
-    // Set session cookie in response
-    res.cookie("session", sessionCookie, {
-      maxAge: 60 * 60 * 24 * 7 * 1000,
-      httpOnly: true,
-      secure: process.env.NODE_ENV === "production",
-      sameSite: "lax",
-      path: "/",
-    });
-
-    // Return user data (excluding sensitive info)
-    res.status(200).json({
-      success: true,
-      data: {
-        uid: userRecord.uid,
-        name: userRecord.displayName,
-        email: userRecord.email,
-      },
-    });
-  } catch (error) {
-    next(new AppError(401, "Invalid credentials or session creation failed"));
-  }
 };
