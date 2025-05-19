@@ -12,7 +12,7 @@ const router = express.Router();
 router.get("/courses", authenticateUser, getAllProgress);
 router.get("/courses/:courseId", authenticateUser, getCourseProgress);
 router.post(
-  "/courses/:courseId/lessons/:lessonId/resources/:resourceId",
+  "/courses/:courseId/lessons/:lessonId",
   authenticateUser,
   updateProgress
 );

@@ -35,8 +35,7 @@ export const updateProgress = async (req, res, next) => {
     const result = await ProgressService.updateProgress(
       req.user.uid,
       req.params.courseId,
-      req.params.lessonId,
-      req.params.resourceId
+      req.params.lessonId
     );
     res.status(200).json({
       success: true,

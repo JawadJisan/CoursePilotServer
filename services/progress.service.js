@@ -2,66 +2,72 @@
 import { adminDb } from "../config/firebase.js";
 
 const calculateProgress = (course, progressData) => {
-  let completedModules = 0;
   let completedLessons = 0;
   let completedResources = 0;
+  const totalLessons = course.modules.reduce(
+    (acc, m) => acc + m.lessons.length,
+    0
+  );
+  const totalResources = course.modules.flatMap((m) =>
+    m.lessons.flatMap((l) => l.resources)
+  ).length;
 
   const moduleDetails = course.modules.map((module) => {
     const moduleProgress = progressData.modules[module.id] || { lessons: {} };
-    const moduleLessons = module.lessons.length;
-    let completedModuleLessons = 0;
+    let moduleCompletedLessons = 0;
 
     const lessonDetails = module.lessons.map((lesson) => {
       const lessonProgress = moduleProgress.lessons[lesson.id] || {
         resources: [],
       };
-      const lessonResources = lesson.resources.length;
-      const completedLessonResources = lessonProgress.resources.length;
+      const lessonResourceCount = lesson.resources.length;
+      const completed = lessonProgress.resources.length >= lessonResourceCount;
 
-      completedResources += completedLessonResources;
+      if (completed) {
+        completedLessons++;
+        completedResources += lessonResourceCount;
+      } else {
+        completedResources += lessonProgress.resources.length;
+      }
 
       return {
         lessonId: lesson.id,
-        completed: completedLessonResources === lessonResources,
+        completed,
         progress:
-          lessonResources > 0
-            ? Math.round((completedLessonResources / lessonResources) * 100)
+          lessonResourceCount > 0
+            ? Math.round(
+                (lessonProgress.resources.length / lessonResourceCount) * 100
+              )
             : 0,
-        completedResources: completedLessonResources,
-        totalResources: lessonResources,
+        completedResources: lessonProgress.resources.length,
+        totalResources: lessonResourceCount,
       };
     });
 
-    completedModuleLessons = lessonDetails.filter((l) => l.completed).length;
-    completedLessons += completedModuleLessons;
-
-    const moduleComplete = completedModuleLessons === moduleLessons;
-    if (moduleComplete) completedModules++;
+    moduleCompletedLessons = lessonDetails.filter((l) => l.completed).length;
 
     return {
       moduleId: module.id,
-      completed: moduleComplete,
+      completed: moduleCompletedLessons === module.lessons.length,
       progress:
-        moduleLessons > 0
-          ? Math.round((completedModuleLessons / moduleLessons) * 100)
+        module.lessons.length > 0
+          ? Math.round((moduleCompletedLessons / module.lessons.length) * 100)
           : 0,
-      totalLessons: moduleLessons,
-      completedLessons: completedModuleLessons,
+      totalLessons: module.lessons.length,
+      completedLessons: moduleCompletedLessons,
       lessons: lessonDetails,
     };
   });
 
+  const completedModules = moduleDetails.filter((m) => m.completed).length;
+
   return {
-    overallProgress: Math.round(
-      (completedModules / course.modules.length) * 100
-    ),
+    overallProgress: Math.round((completedLessons / totalLessons) * 100),
     totalModules: course.modules.length,
     completedModules,
-    totalLessons: course.modules.reduce((acc, m) => acc + m.lessons.length, 0),
+    totalLessons,
     completedLessons,
-    totalResources: course.modules.flatMap((m) =>
-      m.lessons.flatMap((l) => l.resources)
-    ).length,
+    totalResources,
     completedResources,
     modules: moduleDetails,
   };
@@ -127,22 +133,15 @@ export const getCourseProgress = async (userId, courseId) => {
     .doc(courseId);
 
   const progressDoc = await progressRef.get();
-  console.log("progressDoc:", progressDoc);
 
   return {
-    course: courseDoc.data(),
     progress: progressDoc.exists
       ? calculateProgress(courseDoc.data(), progressDoc.data())
       : initializeProgress(courseDoc.data()),
   };
 };
 
-export const updateProgress = async (
-  userId,
-  courseId,
-  lessonId,
-  resourceId
-) => {
+export const updateProgressss = async (userId, courseId, lessonId) => {
   const db = adminDb;
   return db.runTransaction(async (transaction) => {
     const courseRef = db.collection("courses").doc(courseId);
@@ -169,14 +168,19 @@ export const updateProgress = async (
           lastAccessed: new Date().toISOString(),
         };
 
-    // Find module containing the lesson
+    // Find module and lesson
     const module = course.modules.find((m) =>
       m.lessons.some((l) => l.id === lessonId)
     );
-
     if (!module) throw new Error("Lesson not found in course");
 
-    // Initialize module progress
+    const lesson = module.lessons.find((l) => l.id === lessonId);
+    if (!lesson) throw new Error("Lesson not found");
+
+    // Get all resource IDs for the lesson
+    const allResourceIds = lesson.resources.map((r) => r.id);
+
+    // Initialize progress structure
     if (!progress.modules[module.id]) {
       progress.modules[module.id] = {
         lessons: {},
@@ -184,7 +188,6 @@ export const updateProgress = async (
       };
     }
 
-    // Initialize lesson progress
     if (!progress.modules[module.id].lessons[lessonId]) {
       progress.modules[module.id].lessons[lessonId] = {
         resources: [],
@@ -192,14 +195,16 @@ export const updateProgress = async (
       };
     }
 
-    // Add resource if not already present
-    if (
-      !progress.modules[module.id].lessons[lessonId].resources.includes(
-        resourceId
-      )
-    ) {
-      progress.modules[module.id].lessons[lessonId].resources.push(resourceId);
-    }
+    // Add all lesson resources if not already present
+    const existingResources =
+      progress.modules[module.id].lessons[lessonId].resources;
+    const newResources = allResourceIds.filter(
+      (id) => !existingResources.includes(id)
+    );
+    progress.modules[module.id].lessons[lessonId].resources = [
+      ...existingResources,
+      ...newResources,
+    ];
 
     // Update timestamps
     progress.lastAccessed = new Date().toISOString();
@@ -215,6 +220,80 @@ export const updateProgress = async (
       courseId,
       ...calculatedProgress,
       updatedAt: new Date().toISOString(),
+    };
+  });
+};
+
+export const updateProgress = async (userId, courseId, lessonId) => {
+  const db = adminDb;
+  return db.runTransaction(async (transaction) => {
+    const [courseDoc, progressDoc] = await Promise.all([
+      transaction.get(db.collection("courses").doc(courseId)),
+      transaction.get(
+        db
+          .collection("users")
+          .doc(userId)
+          .collection("courseProgress")
+          .doc(courseId)
+      ),
+    ]);
+
+    if (!courseDoc.exists) throw new Error("Course not found");
+
+    const course = courseDoc.data();
+    const progress = progressDoc.exists
+      ? progressDoc.data()
+      : {
+          userId,
+          courseId,
+          modules: {},
+          lastAccessed: new Date().toISOString(),
+        };
+
+    // Find module and lesson
+    const module = course.modules.find((m) =>
+      m.lessons.some((l) => l.id === lessonId)
+    );
+    const lesson = module?.lessons.find((l) => l.id === lessonId);
+    if (!lesson) throw new Error("Lesson not found");
+
+    // Initialize progress structure
+    progress.modules[module.id] = progress.modules[module.id] || {
+      lessons: {},
+      lastAccessed: new Date().toISOString(),
+    };
+    progress.modules[module.id].lessons[lessonId] = progress.modules[module.id]
+      .lessons[lessonId] || {
+      resources: [],
+      completedAt: null,
+    };
+
+    // Get all resource IDs and mark them as completed
+    const requiredResources = new Set(lesson.resources.map((r) => r.id));
+    const currentResources = new Set(
+      progress.modules[module.id].lessons[lessonId].resources
+    );
+
+    // Add missing resources
+    requiredResources.forEach((id) => currentResources.add(id));
+    progress.modules[module.id].lessons[lessonId].resources =
+      Array.from(currentResources);
+
+    // Update timestamps
+    const now = new Date().toISOString();
+    progress.lastAccessed = now;
+    progress.modules[module.id].lastAccessed = now;
+
+    // Calculate and save progress
+    const calculated = calculateProgress(course, progress);
+    progress.overallProgress = calculated.overallProgress;
+
+    transaction.set(progressDoc.ref, progress);
+
+    return {
+      courseId,
+      ...calculated,
+      updatedAt: now,
     };
   });
 };
