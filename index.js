@@ -8,13 +8,26 @@ import { errorHandler } from "./middleware/errorHandler.js";
 
 const app = express();
 
+const allowedOrigins = [
+  "http://localhost:3000",
+  "https://your-frontend-site.com",
+  process.env.NEXT_PUBLIC_BASE_URL,
+];
+
 // Middleware
 app.use(
   cors({
-    origin: process.env.NEXT_PUBLIC_BASE_URL,
+    origin: function (origin, callback) {
+      if (!origin || allowedOrigins.includes(origin)) {
+        callback(null, true); // Allow the request
+      } else {
+        callback(new Error("Not allowed by CORS"));
+      }
+    },
     credentials: true,
   })
 );
+
 app.use(express.json());
 app.use(cookieParser());
 
